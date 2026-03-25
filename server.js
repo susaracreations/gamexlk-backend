@@ -19,6 +19,12 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Debug: Log every incoming request to the terminal
+app.use((req, res, next) => {
+  console.log(`📡 [${req.method}] ${req.url}`);
+  next();
+});
+
 // Enable CORS allowing all origins for Vercel frontend connectivity
 app.use(cors({
   origin: '*',
@@ -268,6 +274,88 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// POST add to wishlist
+app.post('/api/wishlist', async (req, res) => {
+  try {
+    const { email, gameId } = req.body;
+    console.log('📦 Wishlist Body:', req.body);
+    console.log(`❤️ POST /api/wishlist request: ${email} adding game ${gameId}`);
+    if (!email || !gameId) return res.status(400).json({ success: false, error: 'Email and Game ID required' });
+
+    // Check if already exists
+    const { data: existing, error: selectError } = await supabase
+      .from('wishlist')
+      .select('*')
+      .eq('user_email', email)
+      .eq('game_id', gameId)
+      .maybeSingle();
+
+    if (selectError) throw selectError;
+
+    if (existing) {
+      return res.json({ success: true, message: 'Already in wishlist' });
+    }
+
+    const { error } = await supabase
+      .from('wishlist')
+      .insert({ user_email: email, game_id: gameId, created_at: new Date().toISOString() });
+
+    if (error) throw error;
+    res.json({ success: true, message: 'Added to wishlist' });
+  } catch (err) {
+    console.error('❌ Supabase Error (POST /wishlist):', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET wishlist
+app.get('/api/wishlist', async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ success: false, error: 'Email required' });
+
+    const { data: wishlistItems, error } = await supabase
+      .from('wishlist')
+      .select('game_id')
+      .eq('user_email', email);
+
+    if (error) throw error;
+
+    if (!wishlistItems || wishlistItems.length === 0) return res.json({ success: true, wishlist: [] });
+
+    const gameIds = wishlistItems.map(item => item.game_id);
+    const { data: games, error: gamesError } = await supabase.from('games').select('*').in('id', gameIds);
+
+    if (gamesError) throw gamesError;
+    res.json({ success: true, wishlist: toCamelCase(games) });
+  } catch (err) {
+    console.error('❌ Supabase Error (GET /wishlist):', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE from wishlist
+app.delete('/api/wishlist/:gameId', async (req, res) => {
+  try {
+    const { email } = req.query;
+    const { gameId } = req.params;
+    console.log(`💔 DELETE /api/wishlist request: ${email} removing game ${gameId}`);
+    if (!email) return res.status(400).json({ success: false, error: 'Email required' });
+
+    const { error } = await supabase
+      .from('wishlist')
+      .delete()
+      .eq('user_email', email)
+      .eq('game_id', gameId);
+
+    if (error) throw error;
+    res.json({ success: true, message: 'Removed from wishlist' });
+  } catch (err) {
+    console.error('❌ Supabase Error (DELETE /wishlist):', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST generate PDF receipt for checkout
 app.post('/api/checkout/generate-pdf', async (req, res) => {
   try {
@@ -349,6 +437,87 @@ app.post('/api/checkout/generate-pdf', async (req, res) => {
   }
 });
 
+// GET orders for a specific user (public for demo purposes)
+app.get('/api/my-orders', async (req, res) => {
+  try {
+    console.log('GET /api/my-orders request received');
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ success: false, error: 'Email required' });
+
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('buyer_email', email)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({ success: true, orders: toCamelCase(orders) });
+  } catch (err) {
+    console.error('❌ Supabase Error (GET /my-orders):', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Add this route to handle order placement
+app.post('/api/orders', async (req, res) => {
+  const {
+    buyer_name,
+    buyer_email,
+    buyer_whatsapp,
+    buyer_discord,
+    total_amount,
+    items
+  } = req.body;
+
+  // Basic Validation
+  if (!buyer_name || !buyer_email || !buyer_whatsapp || !items || items.length === 0) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+
+  try {
+    // Insert order into Supabase 'orders' table
+    const { data, error } = await supabase
+      .from('orders')
+      .insert([
+        {
+          buyer_name,
+          buyer_email,
+          buyer_whatsapp,
+          buyer_discord,
+          total_amount,
+          items // Supabase handles the JSONB conversion automatically
+        }
+      ])
+      .select();
+
+    if (error) throw error;
+
+    // Return success response with the created order
+    res.status(201).json({ success: true, order: data[0] });
+
+  } catch (error) {
+    console.error('Error placing order:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to place order in database' });
+  }
+});
+
+// GET all orders (Protected)
+app.get('/api/orders', requireAuth, async (req, res) => {
+  try {
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({ success: true, orders: toCamelCase(orders) });
+  } catch (err) {
+    console.error('❌ Supabase Error (GET /orders):', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Fallback for SPA-style routing
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
@@ -386,4 +555,3 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Export for Vercel serverless
 module.exports = app;
-
