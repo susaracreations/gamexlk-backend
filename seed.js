@@ -1,11 +1,23 @@
+require('dotenv').config();
 // Seed script — run once with: node seed.js
-const { createClient } = require('@supabase/supabase-js');
+const admin = require('firebase-admin');
 const { v4: uuidv4 } = require('uuid');
 
-// Supabase Admin Config (Service Role)
-const supabaseUrl = 'https://zblqdrcwjakbdxtguxur.supabase.co';
-const supabaseServiceKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpibHFkcmN3amFrYmR4dGd1eHVyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Mzk3NDk0MywiZXhwIjoyMDg5NTUwOTQzfQ.z2ylr9o4qysjNQTpGQH0jEhzFVZNxESywTonj-H_Pcg';
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
+// Firebase Admin Config
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+} catch (err) {
+  console.error("❌ ERROR: Failed to parse GCP_SERVICE_ACCOUNT_KEY in seed script.");
+  process.exit(1);
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  storageBucket: "gamexlk.firebasestorage.app"
+});
+
+const db = admin.firestore();
 
 const sampleGames = [
   {
@@ -83,16 +95,20 @@ const sampleGames = [
 ];
 
 async function seed() {
-  console.log('️  Deleting all existing games from the table...');
-  // A trick to delete all rows without a complex 'where' clause
-  const { error: deleteError } = await supabase.from('games').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-
-  if (deleteError) {
-    console.error('❌ Error deleting existing games:', deleteError.message);
-    return; // Stop if we can't clear the table
+  console.log('️  Deleting all existing games from the collection...');
+  try {
+    const snapshot = await db.collection('games').get();
+    const batch = db.batch();
+    snapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+    await batch.commit();
+  } catch (err) {
+    console.error('❌ Error deleting existing games:', err.message);
+    return;
   }
 
-  console.log('🌱 Starting to seed new data to Supabase...');
+  console.log('🌱 Starting to seed new data to Firebase...');
 
   for (const game of sampleGames) {
     const fullGame = {
@@ -102,12 +118,11 @@ async function seed() {
       created_at: new Date().toISOString()
     };
 
-    const { error } = await supabase.from('games').insert(fullGame);
-
-    if (error) {
-      console.error(`❌ Failed to add ${game.title}:`, error.message);
-    } else {
+    try {
+      await db.collection('games').doc(fullGame.id).set(fullGame);
       console.log(`✅ Added: ${game.title}`);
+    } catch (err) {
+      console.error(`❌ Failed to add ${game.title}:`, err.message);
     }
   }
   console.log(`\n✨ Processed ${sampleGames.length} games.`);

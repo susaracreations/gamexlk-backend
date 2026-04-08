@@ -1,19 +1,36 @@
+require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { createClient } = require('@supabase/supabase-js');
+const admin = require('firebase-admin');
 const PDFDocument = require('pdfkit');
 const cors = require('cors');
+
+if (!process.env.GCP_SERVICE_ACCOUNT_KEY) {
+    console.error("❌ ERROR: GCP_SERVICE_ACCOUNT_KEY is missing from environment variables!");
+    process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── Supabase Config ────────────────────────────────────────────────────────
-const BUCKET_NAME = 'game-images';
-const supabaseUrl = process.env.SUPABASE_URL || 'https://zblqdrcwjakbdxtguxur.supabase.co';
-const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpibHFkcmN3amFrYmR4dGd1eHVyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Mzk3NDk0MywiZXhwIjoyMDg5NTUwOTQzfQ.z2ylr9o4qysjNQTpGQH0jEhzFVZNxESywTonj-H_Pcg';
-const supabase = createClient(supabaseUrl, supabaseKey);
+// ─── Firebase Admin Config ──────────────────────────────────────────────────
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+} catch (err) {
+  console.error("❌ ERROR: Failed to parse GCP_SERVICE_ACCOUNT_KEY. Ensure it is a valid JSON string.");
+  process.exit(1);
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  storageBucket: "gamexlk.firebasestorage.app"
+});
+
+const db = admin.firestore();
+const bucket = admin.storage().bucket();
 
 // Middleware
 app.use(express.json());
@@ -48,24 +65,25 @@ const toCamelCase = (obj) => {
   return obj;
 };
 
-// Upload file to Supabase Storage and return the public URL
+// Upload file to Firebase Storage and return the public URL
 const uploadImage = async (file) => {
   const fileExt = path.extname(file.originalname);
   const fileName = `${Date.now()}-${uuidv4()}${fileExt}`;
+  const blob = bucket.file(fileName);
+  const blobStream = blob.createWriteStream({
+    metadata: { contentType: file.mimetype }
+  });
 
-  const { error } = await supabase.storage
-    .from(BUCKET_NAME)
-    .upload(fileName, file.buffer, {
-      contentType: file.mimetype
+  return new Promise((resolve, reject) => {
+    blobStream.on('error', (err) => reject(err));
+    blobStream.on('finish', async () => {
+      // Make the file public. Note: Requires appropriate bucket permissions
+      await blob.makePublic();
+      const publicUrl = `https://storage.googleapis.com/${bucket.name}/${blob.name}`;
+      resolve(publicUrl);
     });
-
-  if (error) throw error;
-
-  const { data } = supabase.storage
-    .from(BUCKET_NAME)
-    .getPublicUrl(fileName);
-
-  return data.publicUrl;
+    blobStream.end(file.buffer);
+  });
 };
 
 // Multer for image uploads
@@ -117,28 +135,37 @@ app.get('/api/games', async (req, res) => {
   try {
     const { genre, platform, search, sort } = req.query;
 
-    let query = supabase.from('games').select('*');
+    let query = db.collection('games');
 
-    if (genre && genre !== 'all') query = query.eq('genre', genre);
-    if (platform && platform !== 'all') query = query.eq('platform', platform);
-    if (search) {
-      const q = search.toLowerCase();
-      // Use ILIKE for case-insensitive search across multiple columns
-      query = query.or(`title.ilike.%${q}%,description.ilike.%${q}%,publisher.ilike.%${q}%`);
+    if (sort === 'price-asc') query = query.orderBy('price', 'asc');
+    else if (sort === 'price-desc') query = query.orderBy('price', 'desc');
+    else if (sort === 'rating') query = query.orderBy('rating', 'desc');
+    else query = query.orderBy('created_at', 'desc');
+
+    const snapshot = await query.get();
+    let games = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // Perform filtering in memory to avoid complex Firestore Composite Index requirements
+    if (genre && genre !== 'all') {
+      games = games.filter(g => g.genre === genre);
     }
 
-    if (sort === 'price-asc') query = query.order('price', { ascending: true });
-    else if (sort === 'price-desc') query = query.order('price', { ascending: false });
-    else if (sort === 'rating') query = query.order('rating', { ascending: false });
-    else if (sort === 'newest') query = query.order('created_at', { ascending: false });
-    else query = query.order('created_at', { ascending: false }); // Default
+    if (platform && platform !== 'all') {
+      games = games.filter(g => g.platform === platform);
+    }
 
-    const { data: games, error } = await query;
-    if (error) throw error;
+    if (search) {
+      const q = search.toLowerCase();
+      games = games.filter(g =>
+        (g.title || "").toLowerCase().includes(q) ||
+        (g.description || "").toLowerCase().includes(q) ||
+        (g.publisher || "").toLowerCase().includes(q)
+      );
+    }
 
     res.json({ success: true, games: toCamelCase(games), total: games.length });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /games):', err.message);
+    console.error('❌ Firebase Error (GET /games):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -146,11 +173,11 @@ app.get('/api/games', async (req, res) => {
 // GET single game
 app.get('/api/games/:id', async (req, res) => {
   try {
-    const { data: game, error } = await supabase.from('games').select('*').eq('id', req.params.id).single();
-    if (error || !game) return res.status(404).json({ success: false, error: 'Game not found' });
-    res.json({ success: true, game: toCamelCase(game) });
+    const doc = await db.collection('games').doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ success: false, error: 'Game not found' });
+    res.json({ success: true, game: toCamelCase({ id: doc.id, ...doc.data() }) });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /games/:id):', err.message);
+    console.error('❌ Firebase Error (GET /games/:id):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -177,12 +204,10 @@ app.post('/api/games', requireAuth, upload.single('image'), async (req, res) => 
       created_at: new Date().toISOString()
     };
 
-    const { error } = await supabase.from('games').insert(gameForDb);
-    if (error) throw error;
-
+    await db.collection('games').doc(gameForDb.id).set(gameForDb);
     res.json({ success: true, game: toCamelCase(gameForDb), message: 'Game added successfully!' });
   } catch (err) {
-    console.error('❌ Supabase Error (POST /games):', err.message);
+    console.error('❌ Firebase Error (POST /games):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -190,9 +215,10 @@ app.post('/api/games', requireAuth, upload.single('image'), async (req, res) => 
 // PUT update game
 app.put('/api/games/:id', requireAuth, upload.single('image'), async (req, res) => {
   try {
-    // 1. Fetch existing game to preserve image if not updating
-    const { data: current, error: fetchError } = await supabase.from('games').select('*').eq('id', req.params.id).single();
-    if (fetchError || !current) return res.status(404).json({ success: false, error: 'Game not found' });
+    const docRef = db.collection('games').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists) return res.status(404).json({ success: false, error: 'Game not found' });
+    const current = doc.data();
 
     const { title, price, genre, platform, rating, description, publisher, releaseDate, trailer, tags } = req.body;
 
@@ -201,10 +227,12 @@ app.put('/api/games/:id', requireAuth, upload.single('image'), async (req, res) 
     if (req.file) {
       imageUrl = await uploadImage(req.file);
 
-      // Optional: Delete old image if it was on Supabase
-      if (current.image && current.image.includes(`/${BUCKET_NAME}/`)) {
-        const oldPath = current.image.split(`/${BUCKET_NAME}/`)[1];
-        if (oldPath) await supabase.storage.from(BUCKET_NAME).remove([oldPath]);
+      // Optional: Delete old image if it was on Firebase Storage
+      if (current.image && current.image.includes('storage.googleapis.com')) {
+        try {
+          const oldFileName = current.image.split('/').pop();
+          if (oldFileName) await bucket.file(oldFileName).delete();
+        } catch (e) { console.warn("Old image deletion failed", e.message); }
       }
     }
 
@@ -219,16 +247,14 @@ app.put('/api/games/:id', requireAuth, upload.single('image'), async (req, res) 
       release_date: releaseDate || current.release_date,
       trailer: trailer !== undefined ? trailer : current.trailer,
       tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : current.tags,
-      image: imageUrl,
-      // 'updated_at' is handled automatically by the database trigger
+      image: imageUrl
     };
 
-    const { data: updated, error: updateError } = await supabase.from('games').update(updates).eq('id', req.params.id).select().single();
-    if (updateError) throw updateError;
-
-    res.json({ success: true, game: toCamelCase(updated), message: 'Game updated successfully!' });
+    await docRef.update(updates);
+    const updated = await docRef.get();
+    res.json({ success: true, game: toCamelCase({ id: updated.id, ...updated.data() }), message: 'Game updated successfully!' });
   } catch (err) {
-    console.error('❌ Supabase Error (PUT /games/:id):', err.message);
+    console.error('❌ Firebase Error (PUT /games/:id):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -236,23 +262,24 @@ app.put('/api/games/:id', requireAuth, upload.single('image'), async (req, res) 
 // DELETE game
 app.delete('/api/games/:id', requireAuth, async (req, res) => {
   try {
-    // 1. Fetch to get image path
-    const { data: game, error: fetchError } = await supabase.from('games').select('*').eq('id', req.params.id).single();
-    if (fetchError || !game) return res.status(404).json({ success: false, error: 'Game not found' });
+    const docRef = db.collection('games').doc(req.params.id);
+    const doc = await docRef.get();
+    if (!doc.exists) return res.status(404).json({ success: false, error: 'Game not found' });
+    const game = doc.data();
 
-    // Remove image file from Supabase Storage if it exists
-    if (game.image && game.image.includes(`/${BUCKET_NAME}/`)) {
-      const imagePath = game.image.split(`/${BUCKET_NAME}/`)[1];
-      if (imagePath) await supabase.storage.from(BUCKET_NAME).remove([imagePath]);
+    // Remove image file from Storage if it exists
+    if (game.image && game.image.includes('storage.googleapis.com')) {
+      try {
+        const fileName = game.image.split('/').pop();
+        if (fileName) await bucket.file(fileName).delete();
+      } catch (e) { console.warn("Image deletion failed", e.message); }
     }
 
-    // 2. Delete from DB
-    const { error: deleteError } = await supabase.from('games').delete().eq('id', req.params.id);
-    if (deleteError) throw deleteError;
+    await docRef.delete();
 
     res.json({ success: true, message: 'Game deleted successfully!' });
   } catch (err) {
-    console.error('❌ Supabase Error (DELETE /games/:id):', err.message);
+    console.error('❌ Firebase Error (DELETE /games/:id):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -260,16 +287,15 @@ app.delete('/api/games/:id', requireAuth, async (req, res) => {
 // GET stats
 app.get('/api/stats', async (req, res) => {
   try {
-    // Fetch light data for stats
-    const { data: games, error } = await supabase.from('games').select('genre, platform, price');
-    if (error) throw error;
+    const snapshot = await db.collection('games').get();
+    const games = snapshot.docs.map(doc => doc.data());
 
     const genres = [...new Set(games.map(g => g.genre))];
     const platforms = [...new Set(games.map(g => g.platform))];
     const avgPrice = games.length ? (games.reduce((s, g) => s + g.price, 0) / games.length).toFixed(2) : 0;
     res.json({ success: true, total: games.length, genres, platforms, avgPrice });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /stats):', err.message);
+    console.error('❌ Firebase Error (GET /stats):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -282,28 +308,16 @@ app.post('/api/wishlist', async (req, res) => {
     console.log(`❤️ POST /api/wishlist request: ${email} adding game ${gameId}`);
     if (!email || !gameId) return res.status(400).json({ success: false, error: 'Email and Game ID required' });
 
-    // Check if already exists
-    const { data: existing, error: selectError } = await supabase
-      .from('wishlist')
-      .select('*')
-      .eq('user_email', email)
-      .eq('game_id', gameId)
-      .maybeSingle();
+    const existing = await db.collection('wishlist')
+      .where('user_email', '==', email)
+      .where('game_id', '==', gameId).limit(1).get();
 
-    if (selectError) throw selectError;
+    if (!existing.empty) return res.json({ success: true, message: 'Already in wishlist' });
 
-    if (existing) {
-      return res.json({ success: true, message: 'Already in wishlist' });
-    }
-
-    const { error } = await supabase
-      .from('wishlist')
-      .insert({ user_email: email, game_id: gameId, created_at: new Date().toISOString() });
-
-    if (error) throw error;
+    await db.collection('wishlist').add({ user_email: email, game_id: gameId, created_at: new Date().toISOString() });
     res.json({ success: true, message: 'Added to wishlist' });
   } catch (err) {
-    console.error('❌ Supabase Error (POST /wishlist):', err.message);
+    console.error('❌ Firebase Error (POST /wishlist):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -314,22 +328,20 @@ app.get('/api/wishlist', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ success: false, error: 'Email required' });
 
-    const { data: wishlistItems, error } = await supabase
-      .from('wishlist')
-      .select('game_id')
-      .eq('user_email', email);
+    const snapshot = await db.collection('wishlist').where('user_email', '==', email).get();
+    const gameIds = snapshot.docs.map(doc => doc.data().game_id);
 
-    if (error) throw error;
+    if (gameIds.length === 0) return res.json({ success: true, wishlist: [] });
 
-    if (!wishlistItems || wishlistItems.length === 0) return res.json({ success: true, wishlist: [] });
+    // Firestore 'in' query supports up to 30 items
+    const gamesSnapshot = await db.collection('games')
+      .where(admin.firestore.FieldPath.documentId(), 'in', gameIds.slice(0, 30))
+      .get();
 
-    const gameIds = wishlistItems.map(item => item.game_id);
-    const { data: games, error: gamesError } = await supabase.from('games').select('*').in('id', gameIds);
-
-    if (gamesError) throw gamesError;
+    const games = gamesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ success: true, wishlist: toCamelCase(games) });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /wishlist):', err.message);
+    console.error('❌ Firebase Error (GET /wishlist):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -342,16 +354,17 @@ app.delete('/api/wishlist/:gameId', async (req, res) => {
     console.log(`💔 DELETE /api/wishlist request: ${email} removing game ${gameId}`);
     if (!email) return res.status(400).json({ success: false, error: 'Email required' });
 
-    const { error } = await supabase
-      .from('wishlist')
-      .delete()
-      .eq('user_email', email)
-      .eq('game_id', gameId);
+    const snapshot = await db.collection('wishlist')
+      .where('user_email', '==', email)
+      .where('game_id', '==', gameId).get();
 
-    if (error) throw error;
+    const batch = db.batch();
+    snapshot.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+
     res.json({ success: true, message: 'Removed from wishlist' });
   } catch (err) {
-    console.error('❌ Supabase Error (DELETE /wishlist):', err.message);
+    console.error('❌ Firebase Error (DELETE /wishlist):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -365,10 +378,10 @@ app.post('/api/checkout/generate-pdf', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Buyer details and cart items are required.' });
     }
 
-    // --- Save Order to Supabase ---
+    // --- Save Order to Firestore ---
     const totalAmount = cartItems.reduce((sum, item) => sum + (parseFloat(item.price) || 0), 0);
 
-    const { error: dbError } = await supabase.from('orders').insert({
+    await db.collection('orders').add({
       buyer_name: buyerDetails.name,
       buyer_email: buyerDetails.email,
       buyer_phone: buyerDetails.phone,
@@ -376,8 +389,6 @@ app.post('/api/checkout/generate-pdf', async (req, res) => {
       items: cartItems,
       created_at: new Date().toISOString()
     });
-
-    if (dbError) console.error('❌ Failed to save order to DB:', dbError.message);
 
     const doc = new PDFDocument({ margin: 50, size: 'A4' });
 
@@ -444,16 +455,16 @@ app.get('/api/my-orders', async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ success: false, error: 'Email required' });
 
-    const { data: orders, error } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('buyer_email', email)
-      .order('created_at', { ascending: false });
+    // Fetch orders ordered by date, then filter by email in memory to avoid index requirements
+    const snapshot = await db.collection('orders').orderBy('created_at', 'desc').get();
+    
+    const orders = snapshot.docs
+      .map(doc => ({ id: doc.id, ...doc.data() }))
+      .filter(order => order.buyer_email === email);
 
-    if (error) throw error;
     res.json({ success: true, orders: toCamelCase(orders) });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /my-orders):', err.message);
+    console.error('❌ Firebase Error (GET /my-orders):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -475,25 +486,20 @@ app.post('/api/orders', async (req, res) => {
   }
 
   try {
-    // Insert order into Supabase 'orders' table
-    const { data, error } = await supabase
-      .from('orders')
-      .insert([
-        {
-          buyer_name,
-          buyer_email,
-          buyer_whatsapp,
-          buyer_discord,
-          total_amount,
-          items // Supabase handles the JSONB conversion automatically
-        }
-      ])
-      .select();
+    const orderData = {
+      buyer_name,
+      buyer_email,
+      buyer_whatsapp,
+      buyer_discord,
+      total_amount,
+      items,
+      created_at: new Date().toISOString()
+    };
 
-    if (error) throw error;
+    const docRef = await db.collection('orders').add(orderData);
+    const data = (await docRef.get()).data();
 
-    // Return success response with the created order
-    res.status(201).json({ success: true, order: data[0] });
+    res.status(201).json({ success: true, order: { id: docRef.id, ...data } });
 
   } catch (error) {
     console.error('Error placing order:', error.message);
@@ -504,16 +510,12 @@ app.post('/api/orders', async (req, res) => {
 // GET all orders (Protected)
 app.get('/api/orders', requireAuth, async (req, res) => {
   try {
-    const { data: orders, error } = await supabase
-      .from('orders')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+    const snapshot = await db.collection('orders').orderBy('created_at', 'desc').get();
+    const orders = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
     res.json({ success: true, orders: toCamelCase(orders) });
   } catch (err) {
-    console.error('❌ Supabase Error (GET /orders):', err.message);
+    console.error('❌ Firebase Error (GET /orders):', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -526,30 +528,6 @@ app.get('*', (req, res) => {
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, async () => {
     console.log(`\n🎮 Gamexlk Store running at http://localhost:${PORT}`);
-    console.log(`👉 API Server ready. If you see 'Proxy error' in React, make sure this terminal stays open!`);
-
-    // Verify Supabase connection
-    try {
-      console.log('⏳ Verifying Supabase connection...');
-
-      // Timeout if Supabase doesn't respond in 5 seconds
-      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timed out - Check if Supabase project is paused')), 5000));
-      const query = supabase.from('games').select('id').limit(1);
-      const { error } = await Promise.race([query, timeout]);
-
-      if (error) {
-        console.error('\n❌ SUPABASE CONNECTION FAILED');
-        console.error('   Error:', error.message);
-        console.error('   Hint: Your SUPABASE_URL or SUPABASE_KEY in server.js might be invalid or expired.');
-        console.error('   Action: Update the keys in server.js or check if your Supabase project is paused.\n');
-      } else {
-        console.log('☁️  Connected to Supabase successfully!');
-      }
-    } catch (err) {
-      console.error('\n❌ SUPABASE CLIENT ERROR');
-      console.error('   Error:', err.message);
-      console.error('   Action: Check your internet connection and Supabase URL.\n');
-    }
   });
 }
 
