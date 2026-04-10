@@ -65,6 +65,15 @@ const toCamelCase = (obj) => {
   return obj;
 };
 
+const toSlug = (text) => {
+  return text.toString().toLowerCase()
+    .replace(/\s+/g, '-')           // Replace spaces with -
+    .replace(/[^\w\-]+/g, '')       // Remove all non-word chars
+    .replace(/\-\-+/g, '-')         // Replace multiple - with single -
+    .replace(/^-+/, '')             // Trim - from start of text
+    .replace(/-+$/, '');            // Trim - from end of text
+};
+
 // Upload file to Firebase Storage and return the public URL
 const uploadImage = async (file) => {
   const fileExt = path.extname(file.originalname);
@@ -171,13 +180,43 @@ app.get('/api/games', async (req, res) => {
 });
 
 // GET single game
-app.get('/api/games/:id', async (req, res) => {
+app.get('/api/games/:idOrSlug', async (req, res) => {
   try {
-    const doc = await db.collection('games').doc(req.params.id).get();
-    if (!doc.exists) return res.status(404).json({ success: false, error: 'Game not found' });
+    const { idOrSlug } = req.params;
+    console.log(`🔍 Fetching game: ${idOrSlug}`);
+    
+    // Try by ID first
+    let doc = await db.collection('games').doc(idOrSlug).get();
+    
+    if (!doc.exists) {
+        console.log(`  - Not found by ID, trying slug: ${idOrSlug}`);
+        // Try by Slug
+        const snapshot = await db.collection('games').where('slug', '==', idOrSlug).limit(1).get();
+        if (!snapshot.empty) {
+            doc = snapshot.docs[0];
+            console.log(`  - Found by slug field: ${idOrSlug}`);
+        } else {
+            console.log(`  - Not found by slug field, trying fallback title match...`);
+            // Fallback for older data without slug: try matching generated slug from title
+            const allSnapshot = await db.collection('games').get();
+            const found = allSnapshot.docs.find(d => {
+                const data = d.data();
+                return data.title && toSlug(data.title) === idOrSlug;
+            });
+            if (found) {
+                doc = found;
+                console.log(`  - Found by title fallback: ${found.data().title}`);
+            }
+        }
+    }
+
+    if (!doc.exists) {
+        console.warn(`  - ❌ Game not found: ${idOrSlug}`);
+        return res.status(404).json({ success: false, error: 'Game not found' });
+    }
     res.json({ success: true, game: toCamelCase({ id: doc.id, ...doc.data() }) });
   } catch (err) {
-    console.error('❌ Firebase Error (GET /games/:id):', err.message);
+    console.error(`❌ Firebase Error (GET /games/${req.params.idOrSlug}):`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -191,6 +230,7 @@ app.post('/api/games', requireAuth, upload.single('image'), async (req, res) => 
     const gameForDb = {
       id: uuidv4(),
       title: title.trim(),
+      slug: toSlug(title),
       price: parseFloat(price),
       genre: genre || 'Other',
       platform: platform || 'PC',
@@ -247,7 +287,8 @@ app.put('/api/games/:id', requireAuth, upload.single('image'), async (req, res) 
       release_date: releaseDate || current.release_date,
       trailer: trailer !== undefined ? trailer : current.trailer,
       tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : current.tags,
-      image: imageUrl
+      image: imageUrl,
+      slug: title ? toSlug(title) : current.slug
     };
 
     await docRef.update(updates);

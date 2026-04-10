@@ -19,6 +19,15 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+const toSlug = (text) => {
+  return text.toString().toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\w\-]+/g, '')
+    .replace(/\-\-+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
+};
+
 const sampleGames = [
   {
     title: "Elden Ring",
@@ -91,6 +100,174 @@ const sampleGames = [
     release_date: "2018-10-26",
     trailer: "https://www.youtube.com/embed/eaW0tYpxyp0",
     tags: ["Open World", "Western", "Immersive", "Story Rich"]
+  },
+  {
+    title: "Grand Theft Auto V",
+    price: 9500,
+    genre: "Action",
+    platform: "Multi-platform",
+    rating: 4.7,
+    description: "When a young street hustler, a retired bank robber and a terrifying psychopath find themselves entangled with some of the most frightening and deranged elements of the criminal underworld.",
+    publisher: "Rockstar Games",
+    release_date: "2013-09-17",
+    trailer: "https://www.youtube.com/embed/QkkoHAzjnUs",
+    tags: ["Open World", "Crime", "Multiplayer", "Moddable"]
+  },
+  {
+    title: "Euro Truck Simulator 2",
+    price: 3500,
+    genre: "Simulation",
+    platform: "PC",
+    rating: 4.6,
+    description: "Travel across Europe as king of the road, a trucker who delivers important cargo across impressive distances. With dozens of cities to explore, your endurance, skill and speed will all be pushed to their limits.",
+    publisher: "SCS Software",
+    release_date: "2012-10-18",
+    trailer: "https://www.youtube.com/embed/xlTuC18xVII",
+    tags: ["Simulation", "Driving", "Relaxing", "Open World"]
+  },
+  {
+    title: "The Crew Motorfest",
+    price: 16500,
+    genre: "Racing",
+    platform: "Multi-platform",
+    rating: 4.2,
+    description: "The Crew Motorfest has settled in one of the most breathtaking places on Earth: the island of O'ahu, Hawaii. Join high-speed races, themed events, and collect hundreds of iconic cars.",
+    publisher: "Ubisoft",
+    release_date: "2023-09-14",
+    trailer: "https://www.youtube.com/embed/7X8vG_q3_8A",
+    tags: ["Racing", "Open World", "Sports", "Multiplayer"]
+  },
+  {
+    title: "Baldur's Gate 3",
+    price: 18500,
+    genre: "RPG",
+    platform: "Multi-platform",
+    rating: 4.9,
+    description: "Gather your party, and return to the Forgotten Realms in a tale of fellowship and betrayal, sacrifice and survival, and the lure of absolute power.",
+    publisher: "Larian Studios",
+    release_date: "2023-08-03",
+    trailer: "https://www.youtube.com/embed/1T22wNnyph0",
+    tags: ["Turn-Based", "Fantasy", "Choices Matter", "Co-op"]
+  },
+  {
+    title: "Ghost of Tsushima",
+    price: 14500,
+    genre: "Action",
+    platform: "PlayStation / PC",
+    rating: 4.8,
+    description: "In the late 13th century, the Mongol empire has laid waste to entire nations. Jin Sakai must go beyond samurai traditions to wage an unconventional war for the freedom of Tsushima.",
+    publisher: "PlayStation Studios",
+    release_date: "2020-07-17",
+    trailer: "https://www.youtube.com/embed/m7N9uT2p0u4",
+    tags: ["Samurai", "Open World", "Stealth", "Beautiful"]
+  },
+  {
+    title: "Minecraft",
+    price: 8500,
+    genre: "Sandbox",
+    platform: "Multi-platform",
+    rating: 4.7,
+    description: "Explore infinite worlds and build everything from the simplest of homes to the grandest of castles. Play in creative mode with unlimited resources or mine deep into the world in survival mode.",
+    publisher: "Mojang Studios",
+    release_date: "2011-11-18",
+    trailer: "",
+    tags: ["Survival", "Crafting", "Building", "Family Friendly"]
+  },
+  {
+    title: "Forza Horizon 5",
+    price: 14500,
+    genre: "Racing",
+    platform: "PC / Xbox",
+    rating: 4.7,
+    description: "Your ultimate Horizon Adventure awaits! Explore the vibrant and ever-evolving open world landscapes of Mexico with limitless, fun driving action in hundreds of the world’s greatest cars.",
+    publisher: "Xbox Game Studios",
+    release_date: "2021-11-09",
+    trailer: "https://www.youtube.com/embed/FYH9n37B7Yw",
+    tags: ["Racing", "Open World", "Graphics", "Simulation"]
+  },
+  {
+    title: "Stray",
+    price: 6500,
+    genre: "Adventure",
+    platform: "Multi-platform",
+    rating: 4.6,
+    description: "Lost, alone and separated from family, a stray cat must untangle an ancient mystery to escape a long-forgotten cybercity and find their way home.",
+    publisher: "Annapurna Interactive",
+    release_date: "2022-07-19",
+    trailer: "https://www.youtube.com/embed/u84h_LIDf_w",
+    tags: ["Cyberpunk", "Cats", "Indie", "Atmospheric"]
+  },
+  {
+    title: "Counter-Strike 2",
+    price: 0,
+    genre: "FPS",
+    platform: "PC",
+    rating: 4.0,
+    description: "The next installment in the legendary tactical shooter series. CS2 is built on the Source 2 engine and features improved graphics, smoke mechanics, and sub-tick updates.",
+    publisher: "Valve",
+    release_date: "2023-09-27",
+    trailer: "",
+    tags: ["Tactical", "Competitive", "Multiplayer", "eSports"]
+  },
+  {
+    title: "Sekiro: Shadows Die Twice",
+    price: 12500,
+    genre: "Action",
+    platform: "Multi-platform",
+    rating: 4.8,
+    description: "Explore late 1500s Sengoku Japan as you face larger-than-life foes in a dark and twisted world. Unleash an arsenal of deadly prosthetic tools and ninja abilities.",
+    publisher: "Activision",
+    release_date: "2019-03-22",
+    trailer: "https://www.youtube.com/embed/rXMX4YJ7Lks",
+    tags: ["Difficult", "Souls-like", "Stealth", "Masterpiece"]
+  },
+  {
+    title: "Resident Evil 4 Remake",
+    price: 15500,
+    genre: "Horror",
+    platform: "Multi-platform",
+    rating: 4.9,
+    description: "Survival is just the beginning. Six years have passed since the biological disaster in Raccoon City. Leon S. Kennedy tracks the president's kidnapped daughter to a secluded European village.",
+    publisher: "Capcom",
+    release_date: "2023-03-24",
+    trailer: "https://www.youtube.com/embed/idX9_69uN_k",
+    tags: ["Horror", "Action", "Zombies", "Atmospheric"]
+  },
+  {
+    title: "Spider-Man 2",
+    price: 16500,
+    genre: "Action",
+    platform: "PlayStation 5",
+    rating: 4.9,
+    description: "Spider-Men Peter Parker and Miles Morales return for an exciting new adventure in the critically acclaimed franchise for PS5. Swing, jump and utilize the new Web Wings.",
+    publisher: "PlayStation Studios",
+    release_date: "2023-10-20",
+    trailer: "https://www.youtube.com/embed/qZVTkn2NjS0",
+    tags: ["Superhero", "Open World", "Action", "Story Rich"]
+  },
+  {
+    title: "Hades",
+    price: 5500,
+    genre: "Roguelike",
+    platform: "Multi-platform",
+    rating: 4.8,
+    description: "Defy the god of the dead as you hack and slash out of the Underworld in this rogue-like dungeon crawler from the creators of Bastion and Transistor.",
+    publisher: "Supergiant Games",
+    release_date: "2020-09-17",
+    trailer: "",
+    tags: ["Roguelike", "Action", "Great Soundtrack", "Replayable"]
+  },
+  {
+    title: "The Witcher 3: Wild Hunt",
+    price: 8500,
+    genre: "RPG",
+    platform: "Multi-platform",
+    rating: 4.9,
+    description: "The Witcher is a story-driven, next-generation open world role-playing game set in a visually stunning fantasy universe full of meaningful choices and impactful consequences.",
+    publisher: "CD Projekt Red",
+    release_date: "2015-05-19",
+    trailer: "https://www.youtube.com/embed/c0i88t0Kacs",
+    tags: ["Open World", "RPG", "Fantasy", "Story Rich"]
   }
 ];
 
@@ -114,6 +291,7 @@ async function seed() {
     const fullGame = {
       id: uuidv4(),
       ...game,
+      slug: toSlug(game.title),
       image: '/images/default-game.svg',
       created_at: new Date().toISOString()
     };
